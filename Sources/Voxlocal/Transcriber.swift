@@ -27,10 +27,14 @@ actor Transcriber {
         modelsRoot.appendingPathComponent("models/argmaxinc/whisperkit-coreml/\(model.variant)", isDirectory: true)
     }
 
-    /// The tokenizer comes from the matching openai/whisper-* repo and is fetched with the model.
-    static func tokenizerFile(for model: ModelChoice) -> URL {
+    /// The tokenizer usually ships inside the model folder; older variants fetch it from the
+    /// matching openai/whisper-* repo instead.
+    static func tokenizerFiles(for model: ModelChoice) -> [URL] {
         let repo = model == .small ? "whisper-small" : model == .medium ? "whisper-medium" : "whisper-large-v3"
-        return modelsRoot.appendingPathComponent("models/openai/\(repo)/tokenizer.json")
+        return [
+            modelFolder(for: model).appendingPathComponent("tokenizer.json"),
+            modelsRoot.appendingPathComponent("models/openai/\(repo)/tokenizer.json"),
+        ]
     }
 
     static func isDownloaded(_ model: ModelChoice) -> Bool {
@@ -38,7 +42,7 @@ actor Transcriber {
         let folder = modelFolder(for: model)
         return fm.fileExists(atPath: folder.appendingPathComponent("AudioEncoder.mlmodelc").path)
             && fm.fileExists(atPath: folder.appendingPathComponent("TextDecoder.mlmodelc").path)
-            && fm.fileExists(atPath: tokenizerFile(for: model).path)
+            && tokenizerFiles(for: model).contains { fm.fileExists(atPath: $0.path) }
     }
 
     func prepare(_ model: ModelChoice, progress: @escaping @Sendable (Phase) -> Void) async {

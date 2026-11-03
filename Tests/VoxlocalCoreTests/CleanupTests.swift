@@ -61,10 +61,19 @@ private let raw = "kumusta ka na i was thinking na mag lunch tayo"
         #expect(CleanupRequest.userMessage(for: raw) == "<transcript>\n\(raw)\n</transcript>")
     }
 
+    @Test func wordRetentionToleratesPunctuationAndSmallFixes() {
+        // Punctuation, capitals, and hyphenation ("mag lunch" -> "mag-lunch") don't count as changes.
+        #expect(CleanupRequest.wordRetention(original: raw, cleaned: "Kumusta ka na? I was thinking na mag-lunch tayo.") == 1)
+        // One misheard word fixed out of ten is fine.
+        #expect(CleanupRequest.wordRetention(original: raw, cleaned: "Kumusta ka na? I was thinking na mag-lunch kita.") == 0.9)
+        #expect(CleanupRequest.wordRetention(original: raw, cleaned: "How are you?") < CleanupRequest.minimumWordRetention)
+    }
+
     @Test func parsesResultAndStripsWrappers() throws {
-        #expect(try CleanupRequest.parse(json("  Kumusta ka na?  "), original: raw) == "Kumusta ka na?")
-        #expect(try CleanupRequest.parse(json("\"Kumusta ka na?\""), original: raw) == "Kumusta ka na?")
-        #expect(try CleanupRequest.parse(json("<transcript>Kumusta ka na?</transcript>"), original: raw) == "Kumusta ka na?")
+        let clean = "Kumusta ka na? I was thinking na mag-lunch tayo."
+        #expect(try CleanupRequest.parse(json("  \(clean)  "), original: raw) == clean)
+        #expect(try CleanupRequest.parse(json("\"\(clean)\""), original: raw) == clean)
+        #expect(try CleanupRequest.parse(json("<transcript>\(clean)</transcript>"), original: raw) == clean)
     }
 
     @Test func rejectsBadReplies() {
@@ -72,6 +81,10 @@ private let raw = "kumusta ka na i was thinking na mag lunch tayo"
         #expect(throws: CleanupRequest.ParseError.empty) { try CleanupRequest.parse(json("   "), original: raw) }
         #expect(throws: CleanupRequest.ParseError.reportedError("Failed to authenticate")) {
             try CleanupRequest.parse(json("Failed to authenticate", isError: true), original: raw)
+        }
+        #expect(throws: CleanupRequest.ParseError.rewritten) {
+            // Translated to English: most of the original words are gone.
+            try CleanupRequest.parse(json("How are you? I was thinking we could have lunch together."), original: raw)
         }
         let essay = String(repeating: "Here is a long answer to your question. ", count: 10)
         #expect(throws: CleanupRequest.ParseError.implausible) { try CleanupRequest.parse(json(essay), original: raw) }

@@ -17,20 +17,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let cleanupItem = NSMenuItem(title: "Clean Up Grammar with Claude", action: nil, keyEquivalent: "")
     private let cleanupNote = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let lastResultItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let showPillItem = NSMenuItem(title: "Show Overlay Pill", action: nil, keyEquivalent: "")
-    private let showCaretItem = NSMenuItem(title: "Show Caret Indicator", action: nil, keyEquivalent: "")
-    private let showPartialItem = NSMenuItem(title: "Show Live Partial Text", action: nil, keyEquivalent: "")
     private let simulateItem = NSMenuItem(title: "Simulate States", action: nil, keyEquivalent: "")
 
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber()
-    private lazy var hotkeyMonitor = HotkeyMonitor(hotkey: hotkey)
+    private lazy var hotkeyMonitor = HotkeyMonitor(hotkey: settings.hotkey)
     private var accessibilityPoll: Timer?
     private var recordingStartedAt: Date?
     private var cleaner = TranscriptCleaner(runner: ProcessRunner(), claudePath: nil)
 
     private let dictation = DictationState()
-    private let overlaySettings = OverlaySettings()
+    private let settings = AppSettings()
+    private lazy var settingsWindow = SettingsWindowController(settings: settings, actions: SettingsActions(
+        deleteModel: { [weak self] in self?.deleteModel($0) },
+        showModelsFolder: { [weak self] in self?.showModelsFolder() },
+        // The bundled copy, so reading it needs no network.
+        openPrivacy: { Bundle.main.url(forResource: "PRIVACY", withExtension: "md").map { _ = NSWorkspace.shared.open($0) } }
+    ))
     private var overlay: OverlayController?
     private var simulation: Task<Void, Never>?
     private var livePreview: Task<Void, Never>?
@@ -41,31 +44,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let minimumHold: TimeInterval = 0.3
 
     private var modelStatus: ModelStatus = .preparing("Starting…") {
-        didSet { refreshUI() }
+        didSet {
+            switch modelStatus {
+            case .preparing(let message): settings.modelStatus = message; settings.modelBusy = true
+            case .ready: settings.modelStatus = "Ready: \(settings.model.rawValue)"; settings.modelBusy = false
+            case .failed(let message): settings.modelStatus = message; settings.modelBusy = false
+            }
+            settings.downloadedModels = Transcriber.downloadedModels()
+            refreshUI()
+        }
     }
 
-    private var model: ModelChoice {
-        UserDefaults.standard.string(forKey: "model").flatMap(ModelChoice.init(rawValue:)) ?? .default
-    }
-
-    /// Optional cleanup step; on by default. When on, transcript text (never audio) goes to Anthropic.
     private var cleanupEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: "cleanupEnabled") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "cleanupEnabled") }
+        get { settings.cleanupEnabled }
+        set { settings.cleanupEnabled = newValue }
     }
 
-    private var hotkey: HotkeyChoice {
-        UserDefaults.standard.string(forKey: "hotkey").flatMap(HotkeyChoice.init(rawValue:)) ?? .default
-    }
+    private var hotkey: HotkeyChoice { settings.hotkey }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         refreshUI()
-        overlay = OverlayController(state: dictation, settings: overlaySettings)
+        overlay = OverlayController(state: dictation, settings: settings)
         observeDictation()
+        observeSettings()
+        settings.downloadedModels = Transcriber.downloadedModels()
         recorder.onLevel = { [weak self] level in self?.dictation.updateLevel(level) }
         // `open Voxlocal.app --args --simulate-states` runs the visual walkthrough at launch.
         if CommandLine.arguments.contains("--simulate-states") { simulateStates() }
+        if CommandLine.arguments.contains("--open-settings") { openSettings() }
 
         hotkeyMonitor.onPress = { [weak self] in self?.startRecording() }
         hotkeyMonitor.onRelease = { [weak self] in self?.finishRecording() }
@@ -73,7 +80,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         Task.detached {
             let path = ClaudeLocator.find()
-            await MainActor.run { self.cleaner = TranscriptCleaner(runner: ProcessRunner(), claudePath: path) }
+            await MainActor.run {
+                self.cleaner = TranscriptCleaner(runner: ProcessRunner(), claudePath: path)
+                self.settings.claudePath = path?.path
+            }
         }
         // Download/load the model while the permission prompts are up.
         Task { await loadModel() }
@@ -86,23 +96,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Model
 
     private func loadModel() async {
-        let model = self.model
+        let model = settings.model
         await transcriber.prepare(model) { phase in
-            Task { @MainActor [weak self] in self?.apply(phase) }
+            Task { @MainActor [weak self] in self?.apply(phase, for: model) }
         }
     }
 
-    private func apply(_ phase: Transcriber.Phase) {
+    private func apply(_ phase: Transcriber.Phase, for model: ModelChoice) {
+        // Ignore progress from a model the user has since switched away from.
+        guard model == settings.model else { return }
         switch phase {
         case .idle: break
         case .downloading(let fraction):
-            modelStatus = .preparing("Downloading \(model.rawValue) model… \(Int(fraction * 100))%")
+            modelStatus = .preparing("Downloading \(model.rawValue) model (one time)… \(Int(fraction * 100))%")
         case .loading:
             modelStatus = .preparing("Loading \(model.rawValue) model…")
         case .ready:
             modelStatus = .ready
         case .failed(let message):
             modelStatus = .failed("Model failed to load: \(message)")
+        }
+    }
+
+    private func deleteModel(_ model: ModelChoice) {
+        Task {
+            do {
+                try await transcriber.delete(model)
+            } catch {
+                settings.modelStatus = error.localizedDescription
+            }
+            settings.downloadedModels = Transcriber.downloadedModels()
+        }
+    }
+
+    /// Reacts to changes made in Settings: reload the model, swap the hotkey, refresh the menu.
+    private func observeSettings() {
+        let model = settings.model
+        let hotkey = settings.hotkey
+        withObservationTracking {
+            _ = settings.model
+            _ = settings.hotkey
+            _ = settings.cleanupEnabled
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.settings.model != model {
+                    self.modelStatus = .preparing("Switching to \(self.settings.model.rawValue)…")
+                    Task { await self.loadModel() }
+                }
+                if self.settings.hotkey != hotkey {
+                    self.hotkeyMonitor.hotkey = self.settings.hotkey
+                    self.hotkeyMonitor.start()
+                }
+                self.refreshUI()
+                self.observeSettings()
+            }
         }
     }
 
@@ -182,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dictation.beginTranscribing()
         // If the live preview already showed text, keep it on screen through the final pass
         // rather than restarting from an empty partial.
-        let showPartial = overlaySettings.showPartialText && !hadLiveText
+        let showPartial = settings.showPartialText && !hadLiveText
         Task {
             do {
                 let raw = try await transcriber.transcribe(samples) { [weak self] partial in
@@ -218,7 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// the pill. Display only: the pasted text always comes from the full pass on release.
     private func startLivePreview() {
         hadLiveText = false
-        guard overlaySettings.showPartialText, overlaySettings.showPill else { return }
+        guard settings.showPartialText, settings.showPill else { return }
         livePreview = Task { [weak self] in
             var language: String?
             while !Task.isCancelled {
@@ -304,15 +352,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(lastResultItem)
         menu.addItem(.separator())
 
-        for (item, action) in [(showPillItem, #selector(toggleShowPill)),
-                               (showCaretItem, #selector(toggleShowCaret)),
-                               (showPartialItem, #selector(toggleShowPartial)),
-                               (simulateItem, #selector(simulateStates))] {
-            item.target = self
-            item.action = action
-            menu.addItem(item)
-        }
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        simulateItem.target = self
+        simulateItem.action = #selector(simulateStates)
         simulateItem.isHidden = true
+        menu.addItem(simulateItem)
         menu.addItem(.separator())
 
         permissionsItem.target = self
@@ -373,9 +419,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cleanupNote.title = cleanupEnabled
             ? "☁︎ On: transcript text (never audio) is sent to Anthropic"
             : "Off: nothing leaves this Mac"
-        showPillItem.state = overlaySettings.showPill ? .on : .off
-        showCaretItem.state = overlaySettings.showCaret ? .on : .off
-        showPartialItem.state = overlaySettings.showPartialText ? .on : .off
 
         let missing = [
             Permissions.microphoneGranted ? nil : "Microphone",
@@ -385,19 +428,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissionsItem.title = "Grant \(missing.joined(separator: " & ")) Access…"
     }
 
-    @objc private func toggleShowPill() {
-        overlaySettings.showPill.toggle()
-        refreshUI()
-    }
-
-    @objc private func toggleShowCaret() {
-        overlaySettings.showCaret.toggle()
-        refreshUI()
-    }
-
-    @objc private func toggleShowPartial() {
-        overlaySettings.showPartialText.toggle()
-        refreshUI()
+    @objc private func openSettings() {
+        settingsWindow.show()
     }
 
     /// "Simulate States" is a debug item: shown only when ⌥ is held while opening the menu.

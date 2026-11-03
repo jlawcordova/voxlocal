@@ -13,6 +13,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Voxlocal"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp PRIVACY.md "$APP/Contents/Resources/PRIVACY.md"
 
 # A stable identity keeps macOS permission grants across rebuilds (see scripts/make-signing-cert.sh).
 if security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then

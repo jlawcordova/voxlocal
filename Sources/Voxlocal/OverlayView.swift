@@ -1,29 +1,6 @@
 import SwiftUI
 import VoxlocalCore
 
-/// Display preferences the overlay reads; toggled from the menu.
-@MainActor
-@Observable
-final class OverlaySettings {
-    var showPill: Bool { didSet { save() } }
-    var showCaret: Bool { didSet { save() } }
-    var showPartialText: Bool { didSet { save() } }
-
-    init() {
-        let d = UserDefaults.standard
-        showPill = d.object(forKey: "overlay.showPill") as? Bool ?? true
-        showCaret = d.object(forKey: "overlay.showCaret") as? Bool ?? true
-        showPartialText = d.object(forKey: "overlay.showPartialText") as? Bool ?? true
-    }
-
-    private func save() {
-        let d = UserDefaults.standard
-        d.set(showPill, forKey: "overlay.showPill")
-        d.set(showCaret, forKey: "overlay.showCaret")
-        d.set(showPartialText, forKey: "overlay.showPartialText")
-    }
-}
-
 /// Where the pill sits inside its taller, transparent panel: against the caret side, so it
 /// stays snug under (or over) the caret whether it has one row or two.
 @MainActor
@@ -35,7 +12,7 @@ final class OverlayPlacement {
 /// The floating pill: a status row, plus the live transcript underneath while you speak.
 struct OverlayView: View {
     let state: DictationState
-    let settings: OverlaySettings
+    let settings: AppSettings
     let placement: OverlayPlacement
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

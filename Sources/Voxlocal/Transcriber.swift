@@ -18,6 +18,8 @@ actor Transcriber {
     private var previewTask: Task<[TranscriptionResult]?, Never>?
     private let stopPreview = StopFlag()
     private var loadedModel: ModelChoice?
+    /// The most recently requested model; an older, slower load that finishes later is dropped.
+    private var requestedModel: ModelChoice?
 
     static let modelsRoot: URL = {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -47,11 +49,36 @@ actor Transcriber {
             && tokenizerFiles(for: model).contains { fm.fileExists(atPath: $0.path) }
     }
 
+    static func downloadedModels() -> Set<ModelChoice> {
+        Set(ModelChoice.allCases.filter(isDownloaded))
+    }
+
+    /// Bytes the model's folder takes on disk.
+    static func diskSize(of model: ModelChoice) -> Int64 {
+        let folder = modelFolder(for: model)
+        guard let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in files {
+            total += Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0)
+        }
+        return total
+    }
+
+    /// Removes a downloaded model from disk. The loaded model can't be deleted.
+    func delete(_ model: ModelChoice) throws {
+        guard model != loadedModel else { throw TranscriberError.modelInUse }
+        let folder = Self.modelFolder(for: model)
+        if FileManager.default.fileExists(atPath: folder.path) {
+            try FileManager.default.removeItem(at: folder)
+        }
+    }
+
     func prepare(_ model: ModelChoice, progress: @escaping @Sendable (Phase) -> Void) async {
         if loadedModel == model, whisper != nil {
             progress(.ready)
             return
         }
+        requestedModel = model
         whisper = nil
         loadedModel = nil
         do {
@@ -77,7 +104,9 @@ actor Transcriber {
                 download: false
             )
             // On a fresh download the tokenizer is fetched here, once; later loads find it locally.
-            whisper = try await WhisperKit(config)
+            let loaded = try await WhisperKit(config)
+            guard requestedModel == model else { return }
+            whisper = loaded
             loadedModel = model
             progress(.ready)
         } catch {
@@ -149,6 +178,12 @@ actor Transcriber {
 
     enum TranscriberError: LocalizedError {
         case notReady
-        var errorDescription: String? { "The speech model isn't loaded yet." }
+        case modelInUse
+        var errorDescription: String? {
+            switch self {
+            case .notReady: return "The speech model isn't loaded yet."
+            case .modelInUse: return "That model is in use. Switch to another model first."
+            }
+        }
     }
 }

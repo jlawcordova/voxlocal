@@ -35,7 +35,7 @@ final class OverlayPanel: NSPanel {
 @MainActor
 final class OverlayController {
     private let state: DictationState
-    private let settings: OverlaySettings
+    private let settings: AppSettings
     private let placement = OverlayPlacement()
     private lazy var pill = OverlayPanel(size: OverlayLayout.pillPanelSize,
                                          content: OverlayView(state: state, settings: settings, placement: placement))
@@ -47,7 +47,7 @@ final class OverlayController {
     private var lastResult: CaretLocator.Result = .unavailable
     private var visible = false
 
-    init(state: DictationState, settings: OverlaySettings) {
+    init(state: DictationState, settings: AppSettings) {
         self.state = state
         self.settings = settings
         observe()

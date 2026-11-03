@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case idle
         case recording
         case transcribing
+        case cleaning
         case error(String)
     }
 
@@ -15,12 +16,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let menu = NSMenu()
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let permissionsItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let cleanupItem = NSMenuItem(title: "Clean Up Grammar with Claude", action: nil, keyEquivalent: "")
+    private let cleanupNote = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let lastResultItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber()
     private lazy var hotkeyMonitor = HotkeyMonitor(hotkey: hotkey)
     private var accessibilityPoll: Timer?
     private var recordingStartedAt: Date?
+    private var cleaner = TranscriptCleaner(runner: ProcessRunner(), claudePath: nil)
 
     /// Holds shorter than this are treated as accidental taps.
     private let minimumHold: TimeInterval = 0.3
@@ -31,6 +36,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var model: ModelChoice {
         UserDefaults.standard.string(forKey: "model").flatMap(ModelChoice.init(rawValue:)) ?? .default
+    }
+
+    /// Optional cleanup step; on by default. When on, transcript text (never audio) goes to Anthropic.
+    private var cleanupEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "cleanupEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "cleanupEnabled") }
     }
 
     private var hotkey: HotkeyChoice {
@@ -45,6 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.onRelease = { [weak self] in self?.finishRecording() }
         hotkeyMonitor.onInterrupt = { [weak self] in self?.cancelRecording() }
 
+        Task.detached {
+            let path = ClaudeLocator.find()
+            await MainActor.run { self.cleaner = TranscriptCleaner(runner: ProcessRunner(), claudePath: path) }
+        }
         // Download/load the model while the permission prompts are up.
         Task { await loadModel() }
         Task {
@@ -129,9 +144,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state = .transcribing
         Task {
             do {
-                if let text = try await transcriber.transcribe(samples) {
-                    Paster.paste(text)
+                guard let raw = try await transcriber.transcribe(samples) else {
+                    state = .idle
+                    return
                 }
+                if cleanupEnabled { state = .cleaning }
+                // Bounded by the cleaner's 5 s timeout; any failure yields the raw transcript.
+                let outcome = await cleaner.clean(raw, enabled: cleanupEnabled)
+                Paster.paste(outcome.text)
+                lastResultItem.title = Self.describe(outcome)
+                lastResultItem.isHidden = false
                 state = .idle
             } catch {
                 state = .error(error.localizedDescription)
@@ -144,6 +166,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildMenu() {
         statusLine.isEnabled = false
         menu.addItem(statusLine)
+        menu.addItem(.separator())
+
+        cleanupItem.target = self
+        cleanupItem.action = #selector(toggleCleanup)
+        menu.addItem(cleanupItem)
+        cleanupNote.isEnabled = false
+        menu.addItem(cleanupNote)
+        lastResultItem.isEnabled = false
+        lastResultItem.isHidden = true
+        menu.addItem(lastResultItem)
         menu.addItem(.separator())
 
         permissionsItem.target = self
@@ -176,6 +208,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .transcribing:
             symbol = "waveform"
             status = "Transcribing on-device…"
+        case .cleaning:
+            symbol = "text.badge.checkmark"
+            status = "Cleaning up with Claude…"
         case .error(let message):
             symbol = "exclamationmark.triangle"
             status = message
@@ -185,9 +220,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Voxlocal: \(status)")
             image?.isTemplate = state != .recording
             button.image = state == .recording ? image?.tinted(.systemRed) : image
-            button.toolTip = "Voxlocal: \(status)"
+            // Visible reminder that transcript text leaves the Mac while cleanup is on.
+            button.title = cleanupEnabled ? " ☁︎" : ""
+            button.imagePosition = .imageLeft
+            button.toolTip = "Voxlocal: \(status)" + (cleanupEnabled ? "\nCleanup ON: transcript text is sent to Anthropic" : "")
         }
         statusLine.title = status
+
+        cleanupItem.state = cleanupEnabled ? .on : .off
+        cleanupNote.title = cleanupEnabled
+            ? "☁︎ On: transcript text (never audio) is sent to Anthropic"
+            : "Off: nothing leaves this Mac"
 
         let missing = [
             Permissions.microphoneGranted ? nil : "Microphone",
@@ -195,6 +238,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ].compactMap { $0 }
         permissionsItem.isHidden = missing.isEmpty
         permissionsItem.title = "Grant \(missing.joined(separator: " & ")) Access…"
+    }
+
+    @objc private func toggleCleanup() {
+        cleanupEnabled.toggle()
+        refreshUI()
+    }
+
+    private static func describe(_ outcome: CleanupOutcome) -> String {
+        switch outcome {
+        case .cleaned: return "Last dictation: cleaned up by Claude"
+        case .raw(_, .disabled): return "Last dictation: pasted as transcribed"
+        case .raw(_, .claudeNotFound): return "Last dictation: raw (claude CLI not found)"
+        case .raw(_, .timedOut): return "Last dictation: raw (cleanup timed out)"
+        case .raw(_, .failed(let why)): return "Last dictation: raw (\(why.prefix(60)))"
+        }
     }
 
     @objc private func fixPermissions() {

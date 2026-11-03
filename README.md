@@ -18,5 +18,5 @@ across rebuilds.
 ## Status
 
 - [x] Stage 1: hotkey → on-device transcription → paste
-- [ ] Stage 2: optional grammar cleanup via `claude -p`
+- [x] Stage 2: optional grammar cleanup via `claude -p` (falls back to the raw transcript)
 - [ ] Stage 3: settings window, PRIVACY.md

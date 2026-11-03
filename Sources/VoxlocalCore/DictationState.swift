@@ -25,7 +25,8 @@ public final class DictationState {
     public private(set) var phase: Phase = .idle
     /// Microphone level while listening, 0...1.
     public private(set) var level: Float = 0
-    /// Text decoded so far while transcribing.
+    /// Text decoded so far: the live preview while listening, then the final pass while
+    /// transcribing. Carried over from listening into transcribing so it doesn't flicker.
     public private(set) var partialText = ""
 
     /// How long `pasted` and `error` stay visible before returning to idle.
@@ -90,7 +91,7 @@ public final class DictationState {
     }
 
     public func updatePartial(_ text: String) {
-        guard phase == .transcribing else { return }
+        guard phase == .listening || phase == .transcribing else { return }
         partialText = text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -100,7 +101,7 @@ public final class DictationState {
         phase = next
         generation += 1
         if next == .listening { level = 0 }
-        if next == .listening || next == .transcribing { partialText = "" }
+        if next == .listening { partialText = "" }
 
         switch next {
         case .pasted: scheduleReturnToIdle(after: pastedDuration)
@@ -120,6 +121,15 @@ public final class DictationState {
     }
 
     // MARK: - Display helpers
+
+    /// Splits display text into a settled part and the last few words, which are the ones most
+    /// likely to change as more audio arrives and are drawn dimmed.
+    public nonisolated static func liveParts(_ text: String, tentativeWords: Int = 3) -> (settled: String, tentative: String) {
+        let words = text.split(separator: " ", omittingEmptySubsequences: true)
+        guard words.count > tentativeWords else { return ("", words.joined(separator: " ")) }
+        return (words.dropLast(tentativeWords).joined(separator: " "),
+                words.suffix(tentativeWords).joined(separator: " "))
+    }
 
     /// The last `limit` characters, with a leading ellipsis when cut, so the newest words show.
     public nonisolated static func tail(_ text: String, limit: Int = 60) -> String {

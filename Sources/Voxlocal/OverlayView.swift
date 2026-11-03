@@ -24,30 +24,60 @@ final class OverlaySettings {
     }
 }
 
-/// The floating pill. It stays centered in its (transparent, click-through) panel.
+/// Where the pill sits inside its taller, transparent panel: against the caret side, so it
+/// stays snug under (or over) the caret whether it has one row or two.
+@MainActor
+@Observable
+final class OverlayPlacement {
+    var belowCaret = true
+}
+
+/// The floating pill: a status row, plus the live transcript underneath while you speak.
 struct OverlayView: View {
     let state: DictationState
     let settings: OverlaySettings
+    let placement: OverlayPlacement
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 8) {
-            content
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) { statusRow }
+                .frame(height: 16)
+            if let text = liveText {
+                LiveTextView(text: text)
+                    .frame(width: OverlayLayout.maxPillWidth - 24, alignment: .leading)
+                    .transition(.opacity)
+            }
         }
         .font(.system(size: 13, weight: .medium))
         .lineLimit(1)
         .padding(.horizontal, 12)
-        .frame(height: 30)
+        .padding(.vertical, 7)
         .frame(maxWidth: OverlayLayout.maxPillWidth)
-        .fixedSize(horizontal: true, vertical: false)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.primary.opacity(0.12), lineWidth: 0.5))
+        .fixedSize()
+        .background(.regularMaterial, in: shape)
+        .overlay(shape.strokeBorder(.primary.opacity(0.12), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, maxHeight: .infinity,
+               alignment: placement.belowCaret ? .top : .bottom)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: state.phase)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: liveText == nil)
     }
 
-    @ViewBuilder private var content: some View {
+    /// One row reads as a capsule; two rows as a rounded rectangle with the same corners.
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 15, style: .continuous) }
+
+    /// Transcript text to show under the status row, if any.
+    private var liveText: String? {
+        guard settings.showPartialText, !state.partialText.isEmpty else { return nil }
+        switch state.phase {
+        case .listening, .transcribing: return state.partialText
+        default: return nil
+        }
+    }
+
+    @ViewBuilder private var statusRow: some View {
         switch state.phase {
         case .idle:
             EmptyView()
@@ -57,14 +87,7 @@ struct OverlayView: View {
             Text("Listening")
         case .transcribing:
             Image(systemName: "waveform").foregroundStyle(.secondary)
-            if settings.showPartialText, !state.partialText.isEmpty {
-                Text(DictationState.tail(state.partialText))
-                    .foregroundStyle(.secondary)
-                    .truncationMode(.head)
-                    .frame(maxWidth: OverlayLayout.maxPillWidth - 60, alignment: .leading)
-            } else {
-                Text("Transcribing…")
-            }
+            Text("Transcribing…")
         case .polishing:
             if reduceMotion {
                 Image(systemName: "ellipsis").foregroundStyle(.secondary)
@@ -86,6 +109,23 @@ struct OverlayView: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: OverlayLayout.maxPillWidth - 60, alignment: .leading)
         }
+    }
+}
+
+/// The newest words of the transcript, up to two lines: settled words in the secondary
+/// color, the last few (still likely to change) fainter.
+private struct LiveTextView: View {
+    let text: String
+
+    var body: some View {
+        let parts = DictationState.liveParts(DictationState.tail(text, limit: OverlayLayout.liveTextCharacters))
+        (Text(parts.settled.isEmpty ? "" : parts.settled + " ").foregroundStyle(.secondary)
+            + Text(parts.tentative).foregroundStyle(.tertiary))
+            .font(.system(size: 12))
+            .lineLimit(2)
+            .truncationMode(.head)
+            .multilineTextAlignment(.leading)
+            .accessibilityLabel("Live transcript: \(text)")
     }
 }
 
@@ -112,7 +152,10 @@ struct CaretDotView: View {
 
 enum OverlayLayout {
     static let maxPillWidth: CGFloat = 320
-    static let pillPanelSize = CGSize(width: 340, height: 44)
+    /// Tall enough for the status row plus two lines of live text, with room for the shadow.
+    static let pillPanelSize = CGSize(width: 340, height: 84)
+    /// How much of the newest transcript the pill shows (about two lines).
+    static let liveTextCharacters = 90
     static let dotPanelSize = CGSize(width: 16, height: 16)
 }
 

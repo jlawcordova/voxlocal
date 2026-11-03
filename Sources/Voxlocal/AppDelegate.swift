@@ -33,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let overlaySettings = OverlaySettings()
     private var overlay: OverlayController?
     private var simulation: Task<Void, Never>?
+    private var livePreview: Task<Void, Never>?
+    /// Whether the live preview produced any text for the current dictation.
+    private var hadLiveText = false
 
     /// Holds shorter than this are treated as accidental taps.
     private let minimumHold: TimeInterval = 0.3
@@ -154,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try recorder.start()
             recordingStartedAt = Date()
             dictation.startListening()
+            startLivePreview()
         } catch {
             dictation.fail(error.localizedDescription)
         }
@@ -161,12 +165,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func cancelRecording() {
         guard dictation.phase == .listening else { return }
+        stopLivePreview()
         _ = recorder.stop()
         dictation.cancel()
     }
 
     private func finishRecording() {
         guard dictation.phase == .listening else { return }
+        stopLivePreview()
         let samples = recorder.stop()
         let held = Date().timeIntervalSince(recordingStartedAt ?? Date())
         guard held >= minimumHold, samples.count > Int(AudioRecorder.sampleRate * minimumHold) else {
@@ -174,7 +180,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         dictation.beginTranscribing()
-        let showPartial = overlaySettings.showPartialText
+        // If the live preview already showed text, keep it on screen through the final pass
+        // rather than restarting from an empty partial.
+        let showPartial = overlaySettings.showPartialText && !hadLiveText
         Task {
             do {
                 let raw = try await transcriber.transcribe(samples) { [weak self] partial in
@@ -204,6 +212,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // MARK: - Live preview
+
+    /// While the key is held, transcribe the latest audio about once a second and show it in
+    /// the pill. Display only: the pasted text always comes from the full pass on release.
+    private func startLivePreview() {
+        hadLiveText = false
+        guard overlaySettings.showPartialText, overlaySettings.showPill else { return }
+        livePreview = Task { [weak self] in
+            var language: String?
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled, self.dictation.phase == .listening else { return }
+                // Whisper reads up to 30 s per window; the pill only shows the newest words,
+                // so the last 10 s are enough and keep each pass quick.
+                let (window, total) = self.recorder.snapshot(lastSeconds: 10)
+                guard window.count >= Int(AudioRecorder.sampleRate * 0.8) else { continue }
+                guard let result = await self.transcriber.preview(window, language: language),
+                      !Task.isCancelled, self.dictation.phase == .listening
+                else { continue }
+                // Short clips misdetect easily (especially mixed-language speech), so detect
+                // until ~2 s of audio exist, then keep that language for this dictation.
+                if language == nil, total >= Int(AudioRecorder.sampleRate * 2) {
+                    language = result.language
+                }
+                if !result.text.isEmpty {
+                    self.hadLiveText = true
+                    self.dictation.updatePartial(result.text)
+                }
+            }
+        }
+    }
+
+    private func stopLivePreview() {
+        livePreview?.cancel()
+        livePreview = nil
+    }
+
     // MARK: - Simulation
 
     /// Walks through every overlay state without the microphone, to check the visuals.
@@ -217,16 +262,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             for pass in 0..<3 {
                 s.startListening()
-                for i in 0..<36 {
+                let words = sample.split(separator: " ")
+                for i in 0..<60 {
                     s.updateLevel(Float(abs(sin(Double(i) * 0.45))) * 0.9)
-                    await wait(40)
+                    // Live preview: a few more words roughly every second of "speech".
+                    if i % 6 == 5 { s.updatePartial(words.prefix((i + 1) / 3).joined(separator: " ")) }
+                    await wait(50)
                 }
+                s.updatePartial(sample)
                 s.beginTranscribing()
-                for end in stride(from: 8, through: sample.count, by: 8) {
-                    s.updatePartial(String(sample.prefix(end)))
-                    await wait(70)
-                }
-                await wait(400)
+                await wait(900)
                 switch pass {
                 case 0:
                     s.beginPolishing(); await wait(1400); s.finishPasted(raw: false)

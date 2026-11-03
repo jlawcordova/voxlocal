@@ -49,6 +49,15 @@ final class AudioRecorder {
         }
     }
 
+    /// The most recent `seconds` of audio recorded so far, plus the total recorded sample
+    /// count, without stopping. Used for the live preview.
+    func snapshot(lastSeconds seconds: Double) -> (samples: [Float], totalCount: Int) {
+        lock.withLock {
+            let keep = min(samples.count, Int(seconds * Self.sampleRate))
+            return (Array(samples.suffix(keep)), samples.count)
+        }
+    }
+
     private func append(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat) {
         guard let converter else { return }
         let ratio = format.sampleRate / buffer.format.sampleRate

@@ -82,21 +82,52 @@ import Testing
         #expect(s.phase == .listening)
     }
 
-    @Test func levelAndPartialOnlyApplyInTheirPhase() {
+    @Test func levelOnlyAppliesWhileListening() {
         let s = DictationState()
         s.updateLevel(0.5)
         #expect(s.level == 0)
         s.startListening()
         s.updateLevel(1.7)
         #expect(s.level == 1)
-        s.updatePartial("ignored while listening")
-        #expect(s.partialText == "")
-        s.beginTranscribing()
-        s.updatePartial("  Kumusta ka  ")
-        #expect(s.partialText == "Kumusta ka")
         s.cancel()
         s.startListening()
         #expect(s.level == 0)
+    }
+
+    @Test func liveTextArrivesWhileListeningAndCarriesIntoTranscribing() {
+        let s = DictationState()
+        s.updatePartial("ignored while idle")
+        #expect(s.partialText == "")
+
+        s.startListening()
+        s.updatePartial("  Kumusta ka  ")
+        #expect(s.partialText == "Kumusta ka")
+
+        // No flicker: the live text stays up while the final pass runs.
+        s.beginTranscribing()
+        #expect(s.partialText == "Kumusta ka")
+        s.updatePartial("Kumusta ka na?")
+        #expect(s.partialText == "Kumusta ka na?")
+
+        // Ignored once polishing; cleared when the next dictation starts.
+        s.beginPolishing()
+        s.updatePartial("late update")
+        #expect(s.partialText == "Kumusta ka na?")
+        s.finishPasted(raw: false)
+        s.startListening()
+        #expect(s.partialText == "")
+    }
+
+    @Test func liveTextSplitsOffTheLastFewWords() {
+        let parts = DictationState.liveParts("I was thinking na mag-lunch tayo sa Davao")
+        #expect(parts.settled == "I was thinking na mag-lunch")
+        #expect(parts.tentative == "tayo sa Davao")
+
+        let short = DictationState.liveParts("Kumusta ka")
+        #expect(short.settled == "")
+        #expect(short.tentative == "Kumusta ka")
+
+        #expect(DictationState.liveParts("").tentative == "")
     }
 
     @Test func tailKeepsTheNewestWords() {

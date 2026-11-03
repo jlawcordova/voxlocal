@@ -61,6 +61,13 @@ enum CaretLocator {
             // Neighbours on different lines: the caret is at the start of the next one.
             return CGRect(x: next.minX, y: next.minY, width: 0, height: next.height)
         }
+        if let prev, next == nil, prev.width > prev.height * 2 {
+            // The only neighbour is a line break (reported as a box running to the end of its
+            // line), so the caret is at the start of the empty line below it. The empty range's
+            // own x is reliable even where its y isn't.
+            let x = bounds(element, range).map(\.minX) ?? prev.minX
+            return CGRect(x: x, y: prev.maxY, width: 0, height: prev.height)
+        }
         if let prev {
             return CGRect(x: prev.maxX, y: prev.minY, width: 0, height: prev.height)
         }

@@ -36,8 +36,9 @@ final class OverlayPanel: NSPanel {
 final class OverlayController {
     private let state: DictationState
     private let settings: OverlaySettings
+    private let placement = OverlayPlacement()
     private lazy var pill = OverlayPanel(size: OverlayLayout.pillPanelSize,
-                                         content: OverlayView(state: state, settings: settings))
+                                         content: OverlayView(state: state, settings: settings, placement: placement))
     private lazy var dot = OverlayPanel(size: OverlayLayout.dotPanelSize, content: CaretDotView(state: state))
 
     private var pollTimer: Timer?
@@ -132,7 +133,10 @@ final class OverlayController {
         case .caret(let caret):
             let screen = ScreenGeometry.screen(containing: CGPoint(x: caret.midX, y: caret.midY), screens: frames)
             let visibleFrame = screens.first { $0.frame == screen }?.visibleFrame ?? screen ?? .zero
-            pill.setFrameOrigin(ScreenGeometry.panelOrigin(below: caret, size: pillSize, visibleFrame: visibleFrame, gap: 4))
+            // The panel has 6 pt of transparent margin above the pill (room for its shadow).
+            let origin = ScreenGeometry.panelOrigin(below: caret, size: pillSize, visibleFrame: visibleFrame, gap: -2)
+            placement.belowCaret = origin.y < caret.minY
+            pill.setFrameOrigin(origin)
             let d = OverlayLayout.dotPanelSize
             dot.setFrameOrigin(CGPoint(x: caret.maxX + 3, y: caret.midY - d.height / 2))
             show(pill: settings.showPill, dot: settings.showCaret)
@@ -149,6 +153,7 @@ final class OverlayController {
             let origin = visibleFrame.contains(mouse)
                 ? ScreenGeometry.panelOrigin(below: anchor, size: pillSize, visibleFrame: visibleFrame, gap: 8)
                 : ScreenGeometry.topCenterOrigin(size: pillSize, visibleFrame: visibleFrame)
+            placement.belowCaret = true
             pill.setFrameOrigin(origin)
             show(pill: settings.showPill, dot: false)
         }

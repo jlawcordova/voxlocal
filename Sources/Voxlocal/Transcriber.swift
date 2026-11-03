@@ -15,6 +15,8 @@ actor Transcriber {
     }
 
     private var whisper: WhisperKit?
+    private var previewTask: Task<[TranscriptionResult]?, Never>?
+    private let stopPreview = StopFlag()
     private var loadedModel: ModelChoice?
 
     static let modelsRoot: URL = {
@@ -84,9 +86,42 @@ actor Transcriber {
     }
 
     /// Transcribes 16 kHz mono samples. Language is detected per recording.
+    /// A quick, display-only pass over audio recorded so far, while the user is still speaking.
+    /// Skipped if a preview is already running; stopped early if the final pass starts.
+    /// `language` pins the language once it has been detected from enough audio.
+    func preview(_ samples: [Float], language: String?) async -> (text: String, language: String)? {
+        guard let whisper, previewTask == nil else { return nil }
+        stopPreview.set(false)
+        let options = DecodingOptions(
+            verbose: false,
+            task: .transcribe,
+            language: language,
+            usePrefillPrompt: true,
+            detectLanguage: language == nil,
+            skipSpecialTokens: true,
+            withoutTimestamps: true
+        )
+        let stop = stopPreview
+        let task = Task<[TranscriptionResult]?, Never> {
+            try? await whisper.transcribe(audioArray: samples, decodeOptions: options, callback: { _ in
+                stop.isSet ? false : nil
+            })
+        }
+        previewTask = task
+        let results = await task.value
+        previewTask = nil
+        guard !stopPreview.isSet, let results, let first = results.first else { return nil }
+        let text = TranscriptFilter.clean(results.map(\.text).joined(separator: " ")) ?? ""
+        return (text, first.language)
+    }
+
     /// `onPartial` receives the text decoded so far; it is display-only and never stops decoding.
     func transcribe(_ samples: [Float], onPartial: (@Sendable (String) -> Void)? = nil) async throws -> String? {
         guard let whisper else { throw TranscriberError.notReady }
+        // The final pass has priority: stop any live preview and wait for it to wind down,
+        // so the two never run on the model at once.
+        stopPreview.set(true)
+        _ = await previewTask?.value
         let options = DecodingOptions(
             verbose: false,
             task: .transcribe,
@@ -96,12 +131,20 @@ actor Transcriber {
             skipSpecialTokens: true,
             withoutTimestamps: true
         )
-        let results = try await whisper.transcribe(audioArray: samples, decodeOptions: options) { progress in
+        let results = try await whisper.transcribe(audioArray: samples, decodeOptions: options, callback: { progress in
             onPartial?(TranscriptFilter.clean(progress.text) ?? "")
             return nil
-        }
+        })
         let text = results.map(\.text).joined(separator: " ")
         return TranscriptFilter.clean(text)
+    }
+
+    /// Thread-safe flag read from WhisperKit's progress callback.
+    final class StopFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.withLock { value } }
+        func set(_ on: Bool) { lock.withLock { value = on } }
     }
 
     enum TranscriberError: LocalizedError {

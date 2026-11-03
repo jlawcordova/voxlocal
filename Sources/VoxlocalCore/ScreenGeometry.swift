@@ -41,6 +41,20 @@ public enum ScreenGeometry {
         return CGPoint(x: x, y: y)
     }
 
+    /// Origin (AppKit coordinates) for a panel of `size` centered over `anchor`, `gap` points
+    /// above it; flipped below when there's no room above (e.g. a caret on the first line under
+    /// the menu bar), then clamped inside `visibleFrame`.
+    public static func panelOrigin(above anchor: CGRect, size: CGSize, visibleFrame: CGRect, gap: CGFloat = 8) -> CGPoint {
+        var y = anchor.maxY + gap
+        if y + size.height > visibleFrame.maxY {
+            y = anchor.minY - gap - size.height
+        }
+        var x = anchor.midX - size.width / 2
+        x = min(max(x, visibleFrame.minX), visibleFrame.maxX - size.width)
+        y = min(max(y, visibleFrame.minY), visibleFrame.maxY - size.height)
+        return CGPoint(x: x, y: y)
+    }
+
     /// Fallback position: centered near the top of `visibleFrame`.
     public static func topCenterOrigin(size: CGSize, visibleFrame: CGRect, inset: CGFloat = 12) -> CGPoint {
         CGPoint(x: visibleFrame.midX - size.width / 2, y: visibleFrame.maxY - inset - size.height)

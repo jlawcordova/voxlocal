@@ -23,6 +23,8 @@ struct OverlayView: View {
             if let text = liveText {
                 LiveTextView(text: text)
                     .frame(width: OverlayLayout.maxPillWidth - 24, alignment: .leading)
+                    // Report the wrapped (up to two-line) height so the pill grows to fit it.
+                    .fixedSize(horizontal: false, vertical: true)
                     .transition(.opacity)
             }
         }
@@ -32,7 +34,7 @@ struct OverlayView: View {
         .padding(.vertical, 7)
         .frame(maxWidth: OverlayLayout.maxPillWidth)
         .fixedSize()
-        .background(.regularMaterial, in: shape)
+        .background(.thickMaterial, in: shape)
         .overlay(shape.strokeBorder(.primary.opacity(0.12), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
         .padding(.vertical, 6)
@@ -89,15 +91,16 @@ struct OverlayView: View {
     }
 }
 
-/// The newest words of the transcript, up to two lines: settled words in the secondary
-/// color, the last few (still likely to change) fainter.
+/// The newest words of the transcript, up to two lines: settled words near full strength,
+/// the last few (still likely to change) in grey. The pill floats over your document, so both
+/// need enough contrast to read against text showing through the material.
 private struct LiveTextView: View {
     let text: String
 
     var body: some View {
         let parts = DictationState.liveParts(DictationState.tail(text, limit: OverlayLayout.liveTextCharacters))
-        (Text(parts.settled.isEmpty ? "" : parts.settled + " ").foregroundStyle(.secondary)
-            + Text(parts.tentative).foregroundStyle(.tertiary))
+        (Text(parts.settled.isEmpty ? "" : parts.settled + " ").foregroundStyle(.primary.opacity(0.8))
+            + Text(parts.tentative).foregroundStyle(.secondary))
             .font(.system(size: 12))
             .lineLimit(2)
             .truncationMode(.head)

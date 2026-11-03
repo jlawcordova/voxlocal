@@ -24,7 +24,7 @@ across rebuilds.
 ## Using it
 
 - **Dictate:** hold the hotkey, speak, release. The live transcript appears in a small pill
-  next to your text cursor while you speak.
+  floating just above your text cursor while you speak (below it on a screen's top line).
 - **Menu bar:** the mic icon shows the state. A **☁︎** next to it means cleanup is on.
   "Last dictation" in the menu says whether the last paste was cleaned up or pasted raw, and
   why.

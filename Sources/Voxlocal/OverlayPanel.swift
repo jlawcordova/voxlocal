@@ -133,8 +133,10 @@ final class OverlayController {
         case .caret(let caret):
             let screen = ScreenGeometry.screen(containing: CGPoint(x: caret.midX, y: caret.midY), screens: frames)
             let visibleFrame = screens.first { $0.frame == screen }?.visibleFrame ?? screen ?? .zero
-            // The panel has 6 pt of transparent margin above the pill (room for its shadow).
-            let origin = ScreenGeometry.panelOrigin(below: caret, size: pillSize, visibleFrame: visibleFrame, gap: -2)
+            // Above the caret so it doesn't cover the lines you're about to write into. The panel
+            // has 6 pt of transparent margin around the pill (room for its shadow), so a small
+            // negative gap leaves the pill itself about 4 pt from the caret.
+            let origin = ScreenGeometry.panelOrigin(above: caret, size: pillSize, visibleFrame: visibleFrame, gap: -2)
             placement.belowCaret = origin.y < caret.minY
             pill.setFrameOrigin(origin)
             let d = OverlayLayout.dotPanelSize

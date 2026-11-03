@@ -54,6 +54,18 @@ import Testing
         #expect(flipped.y == 46)
     }
 
+    @Test func placesPanelAboveAndFlipsBelowNearTop() {
+        let size = CGSize(width: 200, height: 40)
+        let caret = CGRect(x: 500, y: 400, width: 2, height: 18)
+        let above = ScreenGeometry.panelOrigin(above: caret, size: size, visibleFrame: primary)
+        #expect(above == CGPoint(x: 401, y: 426))  // caret top 418 + gap 8
+
+        // First line under the menu bar: no room above, so it goes below instead.
+        let nearTop = CGRect(x: 500, y: 870, width: 2, height: 18)
+        let flipped = ScreenGeometry.panelOrigin(above: nearTop, size: size, visibleFrame: primary)
+        #expect(flipped.y == 822)  // caret bottom 870 - gap 8 - height 40
+    }
+
     @Test func clampsPanelInsideScreenEdges() {
         let size = CGSize(width: 200, height: 40)
         let atLeftEdge = ScreenGeometry.panelOrigin(below: CGRect(x: 5, y: 400, width: 2, height: 18), size: size, visibleFrame: primary)

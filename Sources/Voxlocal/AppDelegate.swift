@@ -2,14 +2,12 @@ import AppKit
 import VoxlocalCore
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    enum State: Equatable {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    /// Whether the speech model is usable yet. Separate from the per-dictation state.
+    enum ModelStatus: Equatable {
         case preparing(String)
-        case idle
-        case recording
-        case transcribing
-        case cleaning
-        case error(String)
+        case ready
+        case failed(String)
     }
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -19,6 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let cleanupItem = NSMenuItem(title: "Clean Up Grammar with Claude", action: nil, keyEquivalent: "")
     private let cleanupNote = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let lastResultItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let showPillItem = NSMenuItem(title: "Show Overlay Pill", action: nil, keyEquivalent: "")
+    private let showCaretItem = NSMenuItem(title: "Show Caret Indicator", action: nil, keyEquivalent: "")
+    private let showPartialItem = NSMenuItem(title: "Show Live Partial Text", action: nil, keyEquivalent: "")
+    private let simulateItem = NSMenuItem(title: "Simulate States", action: nil, keyEquivalent: "")
 
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber()
@@ -27,10 +29,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingStartedAt: Date?
     private var cleaner = TranscriptCleaner(runner: ProcessRunner(), claudePath: nil)
 
+    private let dictation = DictationState()
+    private let overlaySettings = OverlaySettings()
+    private var overlay: OverlayController?
+    private var simulation: Task<Void, Never>?
+
     /// Holds shorter than this are treated as accidental taps.
     private let minimumHold: TimeInterval = 0.3
 
-    private var state: State = .preparing("Starting…") {
+    private var modelStatus: ModelStatus = .preparing("Starting…") {
         didSet { refreshUI() }
     }
 
@@ -51,6 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         refreshUI()
+        overlay = OverlayController(state: dictation, settings: overlaySettings)
+        observeDictation()
+        recorder.onLevel = { [weak self] level in self?.dictation.updateLevel(level) }
+        // `open Voxlocal.app --args --simulate-states` runs the visual walkthrough at launch.
+        if CommandLine.arguments.contains("--simulate-states") { simulateStates() }
 
         hotkeyMonitor.onPress = { [weak self] in self?.startRecording() }
         hotkeyMonitor.onRelease = { [weak self] in self?.finishRecording() }
@@ -81,13 +93,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch phase {
         case .idle: break
         case .downloading(let fraction):
-            state = .preparing("Downloading \(model.rawValue) model… \(Int(fraction * 100))%")
+            modelStatus = .preparing("Downloading \(model.rawValue) model… \(Int(fraction * 100))%")
         case .loading:
-            state = .preparing("Loading \(model.rawValue) model…")
+            modelStatus = .preparing("Loading \(model.rawValue) model…")
         case .ready:
-            state = .idle
+            modelStatus = .ready
         case .failed(let message):
-            state = .error("Model failed to load: \(message)")
+            modelStatus = .failed("Model failed to load: \(message)")
+        }
+    }
+
+    /// Keeps the menu-bar icon in step with the dictation state.
+    private func observeDictation() {
+        withObservationTracking {
+            _ = dictation.phase
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.refreshUI()
+                self?.observeDictation()
+            }
         }
     }
 
@@ -112,58 +136,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Dictation
 
+    private var canStartDictation: Bool {
+        guard modelStatus == .ready, simulation == nil else { return false }
+        switch dictation.phase {
+        case .idle, .pasted, .error: return true
+        default: return false
+        }
+    }
+
     private func startRecording() {
-        guard state == .idle else { return }
+        guard canStartDictation else { return }
         guard Permissions.microphoneGranted else {
-            state = .error("Microphone access is off")
+            dictation.fail("Microphone access is off")
             return
         }
         do {
             try recorder.start()
             recordingStartedAt = Date()
-            state = .recording
+            dictation.startListening()
         } catch {
-            state = .error(error.localizedDescription)
+            dictation.fail(error.localizedDescription)
         }
     }
 
     private func cancelRecording() {
-        guard state == .recording else { return }
+        guard dictation.phase == .listening else { return }
         _ = recorder.stop()
-        state = .idle
+        dictation.cancel()
     }
 
     private func finishRecording() {
-        guard state == .recording else { return }
+        guard dictation.phase == .listening else { return }
         let samples = recorder.stop()
         let held = Date().timeIntervalSince(recordingStartedAt ?? Date())
         guard held >= minimumHold, samples.count > Int(AudioRecorder.sampleRate * minimumHold) else {
-            state = .idle
+            dictation.cancel()
             return
         }
-        state = .transcribing
+        dictation.beginTranscribing()
+        let showPartial = overlaySettings.showPartialText
         Task {
             do {
-                guard let raw = try await transcriber.transcribe(samples) else {
-                    state = .idle
+                let raw = try await transcriber.transcribe(samples) { [weak self] partial in
+                    guard showPartial else { return }
+                    Task { @MainActor in self?.dictation.updatePartial(partial) }
+                }
+                guard let raw else {
+                    dictation.cancel()
                     return
                 }
-                if cleanupEnabled { state = .cleaning }
+                let cleanup = cleanupEnabled
+                if cleanup { dictation.beginPolishing() }
                 // Bounded by the cleaner's 5 s timeout; any failure yields the raw transcript.
-                let outcome = await cleaner.clean(raw, enabled: cleanupEnabled)
+                let outcome = await cleaner.clean(raw, enabled: cleanup)
+                // Paste first; the overlay only reflects what already happened.
                 Paster.paste(outcome.text)
+                if case .raw(_, let reason) = outcome, reason != .disabled {
+                    dictation.finishPasted(raw: true)
+                } else {
+                    dictation.finishPasted(raw: false)
+                }
                 lastResultItem.title = Self.describe(outcome)
                 lastResultItem.isHidden = false
-                state = .idle
             } catch {
-                state = .error(error.localizedDescription)
+                dictation.fail(error.localizedDescription)
             }
+        }
+    }
+
+    // MARK: - Simulation
+
+    /// Walks through every overlay state without the microphone, to check the visuals.
+    @objc private func simulateStates() {
+        guard simulation == nil, dictation.phase == .idle else { return }
+        simulation = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let s = self.dictation
+            let sample = "Kumusta ka na? I was thinking na mag-lunch tayo sa Davao later. Maayong buntag, and see you tomorrow na lang ha."
+            func wait(_ ms: Int) async { try? await Task.sleep(for: .milliseconds(ms)) }
+
+            for pass in 0..<3 {
+                s.startListening()
+                for i in 0..<36 {
+                    s.updateLevel(Float(abs(sin(Double(i) * 0.45))) * 0.9)
+                    await wait(40)
+                }
+                s.beginTranscribing()
+                for end in stride(from: 8, through: sample.count, by: 8) {
+                    s.updatePartial(String(sample.prefix(end)))
+                    await wait(70)
+                }
+                await wait(400)
+                switch pass {
+                case 0:
+                    s.beginPolishing(); await wait(1400); s.finishPasted(raw: false)
+                case 1:
+                    s.beginPolishing(); await wait(1400); s.finishPasted(raw: true)
+                default:
+                    s.fail("Simulated error: microphone unavailable")
+                }
+                await wait(2200)
+            }
+            self.simulation = nil
         }
     }
 
     // MARK: - Menu
 
     private func buildMenu() {
+        menu.delegate = self
         statusLine.isEnabled = false
         menu.addItem(statusLine)
         menu.addItem(.separator())
@@ -176,6 +257,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastResultItem.isEnabled = false
         lastResultItem.isHidden = true
         menu.addItem(lastResultItem)
+        menu.addItem(.separator())
+
+        for (item, action) in [(showPillItem, #selector(toggleShowPill)),
+                               (showCaretItem, #selector(toggleShowCaret)),
+                               (showPartialItem, #selector(toggleShowPartial)),
+                               (simulateItem, #selector(simulateStates))] {
+            item.target = self
+            item.action = action
+            menu.addItem(item)
+        }
+        simulateItem.isHidden = true
         menu.addItem(.separator())
 
         permissionsItem.target = self
@@ -195,31 +287,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshUI() {
         let symbol: String
         let status: String
-        switch state {
-        case .preparing(let message):
+        var recording = false
+        switch (modelStatus, dictation.phase) {
+        case (.preparing(let message), _):
             symbol = "arrow.down.circle"
             status = message
-        case .idle:
+        case (.failed(let message), _):
+            symbol = "exclamationmark.triangle"
+            status = message
+        case (.ready, .idle), (.ready, .pasted):
             symbol = "mic"
             status = "Ready. Hold \(hotkey.displayName) to dictate"
-        case .recording:
+        case (.ready, .listening):
             symbol = "mic.fill"
             status = "Listening…"
-        case .transcribing:
+            recording = true
+        case (.ready, .transcribing):
             symbol = "waveform"
             status = "Transcribing on-device…"
-        case .cleaning:
+        case (.ready, .polishing):
             symbol = "text.badge.checkmark"
-            status = "Cleaning up with Claude…"
-        case .error(let message):
+            status = "Polishing with Claude…"
+        case (.ready, .error(let message)):
             symbol = "exclamationmark.triangle"
             status = message
         }
 
         if let button = statusItem.button {
             let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Voxlocal: \(status)")
-            image?.isTemplate = state != .recording
-            button.image = state == .recording ? image?.tinted(.systemRed) : image
+            image?.isTemplate = !recording
+            button.image = recording ? image?.tinted(.systemRed) : image
             // Visible reminder that transcript text leaves the Mac while cleanup is on.
             button.title = cleanupEnabled ? " ☁︎" : ""
             button.imagePosition = .imageLeft
@@ -231,6 +328,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cleanupNote.title = cleanupEnabled
             ? "☁︎ On: transcript text (never audio) is sent to Anthropic"
             : "Off: nothing leaves this Mac"
+        showPillItem.state = overlaySettings.showPill ? .on : .off
+        showCaretItem.state = overlaySettings.showCaret ? .on : .off
+        showPartialItem.state = overlaySettings.showPartialText ? .on : .off
 
         let missing = [
             Permissions.microphoneGranted ? nil : "Microphone",
@@ -238,6 +338,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ].compactMap { $0 }
         permissionsItem.isHidden = missing.isEmpty
         permissionsItem.title = "Grant \(missing.joined(separator: " & ")) Access…"
+    }
+
+    @objc private func toggleShowPill() {
+        overlaySettings.showPill.toggle()
+        refreshUI()
+    }
+
+    @objc private func toggleShowCaret() {
+        overlaySettings.showCaret.toggle()
+        refreshUI()
+    }
+
+    @objc private func toggleShowPartial() {
+        overlaySettings.showPartialText.toggle()
+        refreshUI()
+    }
+
+    /// "Simulate States" is a debug item: shown only when ⌥ is held while opening the menu.
+    func menuWillOpen(_ menu: NSMenu) {
+        simulateItem.isHidden = !NSEvent.modifierFlags.contains(.option)
+        refreshUI()
     }
 
     @objc private func toggleCleanup() {
@@ -267,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Permissions.openAccessibilitySettings()
             startHotkeyWhenTrusted()
         }
-        if case .error = state { state = .idle }
+        if case .error = dictation.phase { dictation.cancel() }
     }
 
     @objc private func showModelsFolder() {

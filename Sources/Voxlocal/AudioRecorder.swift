@@ -10,6 +10,9 @@ final class AudioRecorder {
     private var samples: [Float] = []
     private var converter: AVAudioConverter?
     private(set) var isRecording = false
+    /// Input level 0...1, delivered on the main thread at most ~30 times a second.
+    var onLevel: (@MainActor (Float) -> Void)?
+    private var lastLevelReport = Date.distantPast
 
     func start() throws {
         guard !isRecording else { return }
@@ -66,6 +69,19 @@ final class AudioRecorder {
         guard error == nil, let channel = out.floatChannelData?[0] else { return }
         let chunk = UnsafeBufferPointer(start: channel, count: Int(out.frameLength))
         lock.withLock { samples.append(contentsOf: chunk) }
+        reportLevel(chunk)
+    }
+
+    private func reportLevel(_ chunk: UnsafeBufferPointer<Float>) {
+        guard let onLevel, !chunk.isEmpty else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastLevelReport) >= 1.0 / 30.0 else { return }
+        lastLevelReport = now
+        let rms = sqrt(chunk.reduce(0) { $0 + $1 * $1 } / Float(chunk.count))
+        // Map roughly -50 dB...0 dB to 0...1.
+        let db = 20 * log10(max(rms, 1e-6))
+        let level = min(max((db + 50) / 50, 0), 1)
+        DispatchQueue.main.async { MainActor.assumeIsolated { onLevel(level) } }
     }
 
     enum RecorderError: LocalizedError {

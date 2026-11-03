@@ -84,7 +84,8 @@ actor Transcriber {
     }
 
     /// Transcribes 16 kHz mono samples. Language is detected per recording.
-    func transcribe(_ samples: [Float]) async throws -> String? {
+    /// `onPartial` receives the text decoded so far; it is display-only and never stops decoding.
+    func transcribe(_ samples: [Float], onPartial: (@Sendable (String) -> Void)? = nil) async throws -> String? {
         guard let whisper else { throw TranscriberError.notReady }
         let options = DecodingOptions(
             verbose: false,
@@ -95,7 +96,10 @@ actor Transcriber {
             skipSpecialTokens: true,
             withoutTimestamps: true
         )
-        let results = try await whisper.transcribe(audioArray: samples, decodeOptions: options)
+        let results = try await whisper.transcribe(audioArray: samples, decodeOptions: options) { progress in
+            onPartial?(TranscriptFilter.clean(progress.text) ?? "")
+            return nil
+        }
         let text = results.map(\.text).joined(separator: " ")
         return TranscriptFilter.clean(text)
     }
